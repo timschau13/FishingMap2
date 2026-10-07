@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Seekarte Live – Granbergsträsket</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html,body{margin:0;height:100%;font-family:system-ui,sans-serif}
+  #map{position:absolute;inset:0}
+  .bar{position:absolute;z-index:1000;left:0;right:0;display:flex;gap:6px;flex-wrap:wrap;padding:6px 8px;background:rgba(11,22,32,.88)}
+  #top{top:0;padding-top:calc(env(safe-area-inset-top,0px) + 6px)}
+  #bottom{bottom:0;color:#cfe3f5;font-size:14px;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 6px)}
+  button{background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:9px 12px;font-size:15px}
+  button.off{background:#394b5c}
+  #adj{display:none;position:absolute;z-index:1000;left:8px;right:8px;bottom:60px;background:rgba(11,22,32,.93);color:#fff;border-radius:12px;padding:10px;max-width:420px}
+  #adj .row{display:flex;gap:6px;align-items:center;margin:6px 0;flex-wrap:wrap}
+  #adj input[type=range]{flex:1}
+  #cross{position:absolute;z-index:999;left:50%;top:50%;width:26px;height:26px;margin:-13px 0 0 -13px;pointer-events:none;display:none}
+  #cross:before,#cross:after{content:"";position:absolute;background:#e5383b}
+  #cross:before{left:12px;top:0;width:2px;height:26px}
+  #cross:after{top:12px;left:0;height:2px;width:26px}
+  .leaflet-top{top:52px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="cross"></div>
+
+<div id="top" class="bar">
+  <button id="bGps" class="off">GPS an</button>
+  <button id="bFollow" class="off">Folgen</button>
+  <button id="bAdj" class="off">Karte justieren</button>
+  <button id="bSearch" class="off">Suche</button>
+  <button id="bTrail" class="off">Spur löschen</button>
+</div>
+
+<div id="adj">
+  <div class="row"><b>Tiefenkarte positionieren</b></div>
+  <div class="row">Transparenz <input id="op" type="range" min="0.1" max="1" step="0.05"></div>
+  <div class="row">
+    <button id="bHere">Mitte der Tiefenkarte = Fadenkreuz</button>
+  </div>
+  <div class="row">Größe
+    <button id="sM">−</button><button id="sP">+</button>
+    Drehung
+    <button id="rM">↺</button><button id="rP">↻</button>
+  </div>
+  <div class="row">Feinschieben
+    <button id="nN">↑</button><button id="nS">↓</button><button id="nW">←</button><button id="nE">→</button>
+  </div>
+  <div class="row"><small>Tipp: Karte auf Satellit stellen (Ebenen-Symbol rechts oben), Seeufer deckungsgleich legen. Schritte werden bei höherem Zoom automatisch feiner.</small></div>
+</div>
+
+<div id="bottom" class="bar"><span id="status">Karte lädt…</span></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const IMG='karte.jpg';
+const ASPECT=533/1079;                // Höhe/Breite des Bildes
+const DEFAULT={lat:65.01,lon:19.82,w:2600,op:0.65,rot:0}; // grobe Startwerte, wird per App justiert
+let st=Object.assign({},DEFAULT);
+try{Object.assign(st,JSON.parse(localStorage.getItem('seekarte')||'{}'))}catch(e){}
+function save(){try{localStorage.setItem('seekarte',JSON.stringify(st))}catch(e){}}
+
+const map=L.map('map',{zoomControl:true,maxZoom:19}).setView([st.lat,st.lon],14);
+const osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+const sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri'});
+L.control.layers({'OpenStreetMap':osm,'Satellit':sat}).addTo(map);
+
+// Tiefenkarte als Bild mit Drehung: eigenes Overlay, das 4 Ecken berechnet
+const Rot=L.Layer.extend({
+  onAdd(m){
+    this._m=m;
+    this._img=L.DomUtil.create('img','leaflet-image-layer');
+    this._img.src=IMG; this._img.style.position='absolute'; this._img.style.transformOrigin='0 0';
+    this._img.style.pointerEvents='none';
+    m.getPane('overlayPane').appendChild(this._img);
+    m.on('zoom viewreset move zoomend',this._upd,this); this._img.onload=()=>this._upd(); this._upd();
+  },
+  onRemove(m){L.DomUtil.remove(this._img);m.off('zoom viewreset move zoomend',this._upd,this)},
+  setOpacity(o){this._img.style.opacity=o},
+  _upd(){
+    if(!this._m)return;
+    const c=corners(); // TL, TR, BL als LatLng
+    const p=c.map(ll=>this._m.latLngToLayerPoint(ll));
+    const w=this._img.naturalWidth||1079,h=this._img.naturalHeight||533;
+    const a=(p[1].x-p[0].x)/w,b=(p[1].y-p[0].y)/w,cc=(p[2].x-p[0].x)/h,d=(p[2].y-p[0].y)/h;
+    this._img.style.width=w+'px';this._img.style.height=h+'px';
+    this._img.style.left='0px';this._img.style.top='0px';
+    this._img.style.transform=`matrix(${a},${b},${cc},${d},${p[0].x},${p[0].y})`;
+    this._img.style.opacity=st.op;
+  }
+});
+function corners(){
+  const wm=st.w,hm=st.w*ASPECT,r=st.rot*Math.PI/180,cr=Math.cos(r),sr=Math.sin(r);
+  const pt=(x,y)=>{ // x nach Osten, y nach Süden (Bild), um Mittelpunkt, dann gedreht
+    const X=x*cr-y*sr, Y=x*sr+y*cr;
+    return L.latLng(st.lat-Y/110540, st.lon+X/(111320*Math.cos(st.lat*Math.PI/180)));
+  };
+  return [pt(-wm/2,-hm/2),pt(wm/2,-hm/2),pt(-wm/2,hm/2)];
+}
+const overlay=new Rot().addTo(map);
+function refresh(){overlay._upd();save()}
+
+// ----- Justieren
+$('op').value=st.op; $('op').oninput=e=>{st.op=+e.target.value;refresh()};
+$('bAdj').onclick=()=>{const on=$('adj').style.display!=='block';$('adj').style.display=on?'block':'none';$('cross').style.display=on?'block':'none';$('bAdj').classList.toggle('off',!on)};
+$('bHere').onclick=()=>{const c=map.getCenter();st.lat=c.lat;st.lon=c.lng;refresh()};
+$('sP').onclick=()=>{st.w*=1.05;refresh()}; $('sM').onclick=()=>{st.w/=1.05;refresh()};
+$('rP').onclick=()=>{st.rot+=1;refresh()}; $('rM').onclick=()=>{st.rot-=1;refresh()};
+function stepM(){const mpp=156543*Math.cos(st.lat*Math.PI/180)/Math.pow(2,map.getZoom());return mpp*15} // ~15 Pixel
+$('nN').onclick=()=>{st.lat+=stepM()/110540;refresh()};
+$('nS').onclick=()=>{st.lat-=stepM()/110540;refresh()};
+$('nE').onclick=()=>{st.lon+=stepM()/(111320*Math.cos(st.lat*Math.PI/180));refresh()};
+$('nW').onclick=()=>{st.lon-=stepM()/(111320*Math.cos(st.lat*Math.PI/180));refresh()};
+
+// ----- Suche (Nominatim)
+$('bSearch').onclick=async()=>{
+  const q=prompt('Ortsname suchen:','Granbergsträsket');if(!q)return;
+  try{
+    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(q));
+    const j=await r.json();
+    if(!j.length){alert('Nichts gefunden');return}
+    map.setView([+j[0].lat,+j[0].lon],15);
+    if(confirm('Tiefenkarte auf diesen Punkt setzen?')){st.lat=+j[0].lat;st.lon=+j[0].lon;refresh()}
+  }catch(e){alert('Suche fehlgeschlagen (kein Internet?)')}
+};
+
+// ----- GPS
+let watchId=null,follow=false,pos=null,marker=null,acc=null,trail=L.polyline([],{color:'#ff9f1c',weight:3}).addTo(map);
+function setStatus(){
+  $('status').textContent=pos?`GPS ±${Math.round(pos.acc)} m`+(pos.spd!=null&&pos.spd>=0?` · ${(pos.spd*3.6).toFixed(1)} km/h`:'')+` · ${pos.lat.toFixed(5)}, ${pos.lon.toFixed(5)}`:(watchId===null?'GPS aus':'Suche GPS-Signal…');
+}
+$('bGps').onclick=()=>{
+  if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;$('bGps').textContent='GPS an';$('bGps').classList.add('off');setStatus();return}
+  if(!navigator.geolocation){alert('Keine Geolocation verfügbar');return}
+  watchId=navigator.geolocation.watchPosition(p=>{
+    pos={lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy,spd:p.coords.speed};
+    const ll=[pos.lat,pos.lon];
+    if(!marker){marker=L.circleMarker(ll,{radius:8,color:'#fff',weight:3,fillColor:'#1f6feb',fillOpacity:1}).addTo(map);acc=L.circle(ll,{radius:pos.acc,color:'#1f6feb',weight:1,fillOpacity:.15}).addTo(map)}
+    else{marker.setLatLng(ll);acc.setLatLng(ll);acc.setRadius(pos.acc)}
+    trail.addLatLng(ll);
+    if(follow)map.panTo(ll,{animate:true});
+    setStatus();
+  },e=>{$('status').textContent='GPS-Fehler: '+e.message},{enableHighAccuracy:true,maximumAge:1000,timeout:20000});
+  $('bGps').textContent='GPS aus';$('bGps').classList.remove('off');
+  try{navigator.wakeLock&&navigator.wakeLock.request('screen')}catch(e){}
+  setStatus();
+};
+$('bFollow').onclick=()=>{follow=!follow;$('bFollow').classList.toggle('off',!follow);if(follow&&pos)map.panTo([pos.lat,pos.lon])};
+map.on('dragstart',()=>{follow=false;$('bFollow').classList.add('off')});
+$('bTrail').onclick=()=>trail.setLatLngs([]);
+setStatus();
+</script>
+</body>
+</html>
